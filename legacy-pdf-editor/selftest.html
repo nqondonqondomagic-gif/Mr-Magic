@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>harness</title></head>
+<body style="margin:0">
+<iframe id="f" src="index.html" style="width:1500px;height:1000px;border:0"></iframe>
+<pre id="out">PENDING</pre>
+<script src="libs/pdf-lib.min.js"></script>
+<script>
+var R = { pass: [], fail: [], log: [] };
+function ok(n, c, extra) { (c ? R.pass : R.fail).push(n + (extra === undefined ? '' : ' :: ' + extra)); }
+function done() {
+  document.getElementById('out').textContent = 'TEST-RESULT ' + JSON.stringify(R, null, 1);
+  document.title = R.fail.length ? 'FAIL' : 'PASS';
+}
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+window.addEventListener('load', async function () {
+  try {
+    var fr = document.getElementById('f'), win = fr.contentWindow, doc = fr.contentDocument;
+    ok('page loaded + scripts defined', !!(win.pdfjsLib && win.PDFLib && win.__PDFLAYER__));
+    ok('offline-ocr flag true when served over http', win.__OFFLINE_OCR__ === true);
+
+    // ---- build a realistic source document -------------------------------
+    var d = await PDFLib.PDFDocument.create();
+    var f = await d.embedFont(PDFLib.StandardFonts.Helvetica);
+    var p1 = d.addPage([612, 792]), p2 = d.addPage([595, 842]);
+    p1.drawText('ARBORRETUM PRIMARY SCHOOL - FEE STATEMENT', { x: 60, y: 740, size: 14, font: f });
+    p1.drawText('Pupil: B. Khumalo    Class: 5B', { x: 60, y: 700, size: 11, font: f });
+    p1.drawText('Amount due: R 4 820,00', { x: 60, y: 660, size: 11, font: f });
+    p2.drawText('Second page - judgment annexure', { x: 60, y: 780, size: 11, font: f });
+    d.setTitle('Fee statement');
+    d.setProducer('test-fixture');
+    var bytes = await d.save();
+
+    // ---- capture downloads + suppress modal dialogs ----------------------
+    var captured = [];
+    win.alert = function (m) { R.log.push('alert: ' + String(m).slice(0, 60)); };
+    win.confirm = function (m) { R.log.push('confirm: ' + String(m).slice(0, 40)); return true; };
+    var origCreate = win.URL.createObjectURL.bind(win.URL);
+    win.URL.createObjectURL = function (b) { captured.push(b); return origCreate(b); };
+    var clickCount = { n: 0 };
+    win.HTMLAnchorElement.prototype.click = function () { clickCount.n++; };
+
+    // ---- open the document through the real drop path --------------------
+    var dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'fee-statement.pdf', { type: 'application/pdf' }));
+    var ev = new Event('drop', { bubbles: true });
+    Object.defineProperty(ev, 'dataTransfer', { value: dt });
+    win.dispatchEvent(ev);
+
+    for (var i = 0; i < 60 && !win.__PDFLAYER__.doc; i++) await sleep(100);
+    var S = win.__PDFLAYER__;
+    var shaAtOpen = S.sha;
+    ok('document opened', !!S.doc);
+    ok('two pages detected', S.pages.length === 2, JSON.stringify(S.pages));
+    ok('page 2 keeps its own A4 size', S.pages[1].h === 842, String(S.pages[1].h));
+    ok('sha-256 computed (webcrypto on this origin)', /^[0-9a-f]{64}$/.test(S.sha), S.sha.slice(0, 12));
+    ok('canvas rendered non-blank', (function () {
+      var c = doc.querySelector('.page.show canvas');
+      return !!c && c.width > 400 && c.height > 500;
+    })(), String(doc.querySelector('.page.show canvas') && doc.querySelector('.page.show canvas').width));
+    ok('page 2 canvas exists too', doc.querySelectorAll('.page canvas').length === 2);
+
+    function pdown(t, x, y) {
+      S.tool = t;
+      doc.querySelectorAll('.tool[data-tool]').forEach(function (b) { b.classList.toggle('on', b.dataset.tool === t); });
+      var r = doc.querySelector('.page.show').getBoundingClientRect();
+      var pe = doc.querySelector('.page.show');
+      pe.dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: r.left + x, clientY: r.top + y }));
+      doc.dispatchEvent(new win.PointerEvent('pointermove', { bubbles: true, clientX: r.left + x + 60, clientY: r.top + y + 12 }));
+      doc.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true, clientX: r.left + x + 60, clientY: r.top + y + 12 }));
+    }
+    function clickSel(sel) { var e = doc.querySelector(sel); if (e) e.dispatchEvent(new win.MouseEvent('click', { bubbles: true })); return !!e; }
+
+    // ---- exercise the creating tools ------------------------------------
+    clickSel('#btn-open') && 0; // no-op guard
+    pdown('cover', 100, 120);
+    ok('cover created', S.edits.some(function (e) { return e.t === 'cover' && e.w > 20; }), JSON.stringify(S.edits.filter(function (e) { return e.t === 'cover'; })[0] || null));
+    pdown('strike', 100, 200);
+    ok('strike created with normalised width', S.edits.some(function (e) { return e.t === 'strike' && Math.abs(e.w) > 20; }));
+    pdown('box', 120, 300);
+    ok('box created', S.edits.some(function (e) { return e.t === 'box'; }));
+    pdown('arrow', 200, 340);
+    ok('arrow created with vector geometry', S.edits.some(function (e) { return e.t === 'arrow' && e.w > 20; }));
+    pdown('pen', 240, 420);
+    ok('pen stroke recorded points', S.edits.some(function (e) { return e.t === 'pen' && e.pts && e.pts.length > 1; }));
+    pdown('hl', 100, 500);
+    ok('highlight created', S.edits.some(function (e) { return e.t === 'hl'; }));
+
+    // text tool: click places a box, then commit typed content
+    (function () {
+      S.tool = 'text';
+      var r = doc.querySelector('.page.show').getBoundingClientRect();
+      doc.querySelector('.page.show').dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: r.left + 140, clientY: r.top + 180 }));
+    })();
+    var editing = doc.querySelector('.body[contenteditable="true"]');
+    ok('text tool opened an inline editor', !!editing);
+    if (editing) {
+      editing.textContent = 'R 3 980,00';
+      editing.dispatchEvent(new win.Event('input', { bubbles: true }));
+      editing.blur();
+    }
+    ok('typed text committed to the layer', S.edits.some(function (e) { return e.t === 'text' && e.text === 'R 3 980,00'; }),
+      JSON.stringify((S.edits.find(function (e) { return e.t === 'text'; }) || {}).text));
+    ok('edit count grew', S.edits.length >= 7, String(S.edits.length));
+
+    // ---- svg shapes drawn for geometry items ----------------------------
+    ok('svg layer drew shapes', doc.querySelectorAll('.page.show .laysvg *').length >= 4,
+      String(doc.querySelectorAll('.page.show .laysvg *').length));
+    ok('layer list populated', doc.querySelectorAll('#layers .lay').length === S.edits.filter(function (e) { return e.p === S.cur; }).length);
+
+    // ---- project save round trip ----------------------------------------
+    var before = JSON.parse(JSON.stringify(S.edits));
+    clickSel('#btn-proj');
+    await sleep(120);
+    var projBlob = captured[captured.length - 1];
+    ok('project json downloaded', !!projBlob && clickCount.n > 0);
+    var projText = projBlob ? await projBlob.text() : '';
+    ok('project records source sha + info', /"sha256"/.test(projText) && /"name": "fee-statement.pdf"/.test(projText));
+    S.edits = [];
+    S.sel = null;
+    S.doc && S.showPage ? 0 : 0;
+    doc.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, key: 'z' }));
+    var dt2 = new DataTransfer();
+    dt2.items.add(new File([projText], 'fee-statement.pdflayer.json', { type: 'application/json' }));
+    var ev2 = new Event('drop', { bubbles: true });
+    Object.defineProperty(ev2, 'dataTransfer', { value: dt2 });
+    win.dispatchEvent(ev2);
+    await sleep(300);
+    ok('project reloaded the same edits', S.edits.length === before.length, S.edits.length + ' vs ' + before.length);
+    ok('geometry survived the round trip', JSON.stringify(S.edits.map(function (e) { return [e.t, e.x, e.y, e.w]; })) ===
+      JSON.stringify(before.map(function (e) { return [e.t, e.x, e.y, e.w]; })));
+
+    // ---- export ---------------------------------------------------------
+    var beforeCount = captured.length;
+    clickSel('#btn-export');
+    for (var j = 0; j < 80 && captured.length === beforeCount; j++) await sleep(100);
+    var pdfBlob = captured[captured.length - 1];
+    ok('export produced a blob', !!pdfBlob && pdfBlob !== projBlob && pdfBlob.size > 500, pdfBlob ? String(pdfBlob.size) : 'none');
+    ok('original bytes never mutated', S.bytes.byteLength === bytes.byteLength &&
+      new Uint8Array(S.bytes).slice(0, 40).join() === Array.from(bytes.slice(0, 40)).join());
+
+    if (pdfBlob) {
+      var out = new Uint8Array(await pdfBlob.arrayBuffer());
+      var re = await PDFLib.PDFDocument.load(out.slice(0));
+      ok('exported copy is a valid 2-page pdf', re.getPageCount() === 2, String(re.getPageCount()));
+      ok('page 2 size preserved in export', Math.round(re.getPages()[1].getHeight()) === 842);
+      ok('exported title set', re.getTitle() === 'fee-statement — edited', String(re.getTitle()));
+      ok('writing toolchain disclosed in /Producer', /pdf-lib/.test(String(re.getProducer())), String(re.getProducer()));
+      ok('exported creation date is today (not inherited/faked)',
+        re.getCreationDate().getFullYear() === new Date().getFullYear(), String(re.getCreationDate()));
+      ok('exported modification date set', re.getModificationDate() instanceof Date);
+      var cre = String(re.getCreator());
+      ok('exported creator names this app, the source and its hash',
+        /Mr Magic/.test(cre) && /fee-statement\.pdf/.test(cre) && cre.indexOf(S.sha) > -1, cre.slice(0, 120));
+      ok('exported keywords carry the source hash',
+        String(re.getKeywords()).indexOf('source-sha256:' + S.sha) > -1, String(re.getKeywords()).slice(0, 120));
+      ok('exported subject describes the layer', /layer object/.test(String(re.getSubject())), String(re.getSubject()));
+
+      // read the drawn text back with pdf.js to prove position + content
+      try {
+        var vdoc = await win.pdfjsLib.getDocument({ data: out.slice(0) }).promise;
+        var tc = await (await vdoc.getPage(1)).getTextContent();
+        var items = tc.items.filter(function (it) { return (it.str || '').trim(); });
+        var found = items.filter(function (it) { return it.str.indexOf('R 3 980,00') > -1; })[0];
+        ok('replacement text is present in the exported page', !!found,
+          items.map(function (i) { return i.str; }).join(' | ').slice(0, 140));
+        var te = S.edits.filter(function (e) { return e.t === 'text'; })[0] || { y: 0 };
+        ok('replacement text sits at the edited vertical position', !!found &&
+          Math.abs(found.transform[5] - (792 - te.y - 8)) < 22,
+          found ? 'pdf y=' + Math.round(found.transform[5]) + ' expected ~' + Math.round(792 - te.y - 8) : 'n/a');
+        ok('original page content survives the export',
+          items.some(function (i) { return i.str.indexOf('FEE STATEMENT') > -1 || i.str.indexOf('Statement') > -1; }),
+          items.map(function (i) { return i.str; }).join(' | ').slice(0, 140));
+      } catch (e3) {
+        ok('pdf.js read-back of the export', false, e3.message);
+      }
+    }
+
+    // ---- zoom + page nav ------------------------------------------------
+    var z0 = S.zoom;
+    clickSel('#zoom-in'); await sleep(400);
+    ok('zoom increased', S.zoom > z0, z0 + ' -> ' + S.zoom);
+    ok('canvas resized with zoom', doc.querySelector('.page.show canvas').width > 0 &&
+      Math.abs(doc.querySelector('.page.show canvas').width - S.pages[0].w * S.zoom) < 2,
+      String(doc.querySelector('.page.show canvas').width));
+    var th = doc.querySelectorAll('#thumbs .thumb')[1];
+    if (th) th.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await sleep(500);
+    ok('thumbnail navigation works', S.cur === 2, String(S.cur));
+    ok('page 2 rendered at its own aspect', Math.abs(doc.querySelector('.page.show canvas').height - 842 * S.zoom) < 2);
+
+    // ---- keyboard -------------------------------------------------------
+    var n0 = S.edits.length;
+    S.sel = S.edits[0].id;
+    doc.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, key: 'Delete' }));
+    await sleep(60);
+    ok('Delete removes the selection', S.edits.length === n0 - 1, n0 + ' -> ' + S.edits.length);
+    doc.dispatchEvent(new win.KeyboardEvent('keydown', { bubbles: true, key: 'c' }));
+    ok('shortcut switches tool', S.tool === 'cover', S.tool);
+
+    // ---- OCR + click-a-word-to-correct ----------------------------------
+    var back1 = doc.querySelectorAll('#thumbs .thumb')[0];
+    if (back1) back1.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await sleep(500);
+    clickSel('#btn-ocr');
+    var t0 = Date.now();
+    while (Date.now() - t0 < 180000) {
+      var st = S.ocr[1] && S.ocr[1].status;
+      if (st === 'done' || st === 'err') break;
+      await sleep(500);
+    }
+    var oc = S.ocr[1] || {};
+    ok('offline OCR engine ran', oc.status === 'done', oc.status + ' after ' + Math.round((Date.now() - t0) / 1000) + 's');
+    var ws = oc.words || [];
+    ok('OCR produced word boxes', ws.length > 5, String(ws.length));
+    ok('word geometry is inside the page', ws.every(function (w) {
+      return w.x >= 0 && w.y >= 0 && w.x + w.w <= 612 && w.y + w.h <= 792 && w.w > 0 && w.h > 0;
+    }), JSON.stringify(ws.slice(0, 2)));
+    var kh = ws.filter(function (w) { return /khumalo/i.test(w.text); })[0];
+    ok('OCR read the pupil name from the rendered page', !!kh,
+      ws.map(function (w) { return w.text; }).join(' ').slice(0, 130));
+    ok('word overlay is drawn', doc.querySelectorAll('.page.show .layocr .wb').length === ws.length,
+      doc.querySelectorAll('.page.show .layocr .wb').length + ' vs ' + ws.length);
+
+    if (kh) {
+      var before2 = S.edits.length;
+      S.tool = 'strike';
+      doc.querySelectorAll('.tool[data-tool]').forEach(function (b) { b.classList.toggle('on', b.dataset.tool === 'strike'); });
+      win.__PDFLAYER__.tool = 'strike';
+      doc.querySelector('.layocr').style.pointerEvents = 'auto';
+      var rr = doc.querySelector('.page.show').getBoundingClientRect();
+      doc.querySelector('.page.show').dispatchEvent(new win.PointerEvent('pointerdown', {
+        bubbles: true, button: 0,
+        clientX: rr.left + (kh.x + kh.w / 2) * S.zoom,
+        clientY: rr.top + (kh.y + kh.h / 2) * S.zoom
+      }));
+      await sleep(120);
+      var mk = S.edits.filter(function (e) { return e.t === 'strike' && e.label && /khumalo/i.test(e.label); })[0];
+      var rp = S.edits.filter(function (e) { return e.t === 'text' && e.replaces && /khumalo/i.test(e.replaces); })[0];
+      ok('clicking a recognised word crossed it out', !!mk, JSON.stringify(mk || null));
+      ok('and added a matched replacement box', !!rp && !!rp.fitTo, JSON.stringify(rp || null));
+      ok('replacement is fitted to the original word width', !!rp && Math.abs(rp.fitTo - kh.w) < 0.6,
+        rp ? rp.fitTo + ' vs ' + kh.w : 'n/a');
+      ok('replacement sits on the same line', !!rp && Math.abs(rp.y - kh.y) < kh.h, rp ? rp.y + ' vs ' + kh.y : 'n/a');
+      ok('two objects added by one click', S.edits.length === before2 + 2, before2 + ' -> ' + S.edits.length);
+      var node = doc.querySelector('.body[contenteditable="true"]');
+      ok('replacement editor opened for typing', !!node);
+      if (node) {
+        node.textContent = 'M. Dlamini';
+        node.dispatchEvent(new win.Event('input', { bubbles: true }));
+        node.blur();
+        await sleep(80);
+        ok('correction typed and committed', (rp.text || '') === 'M. Dlamini', String(rp.text));
+      }
+      // final export with the word-level correction baked in
+      var c2 = captured.length;
+      clickSel('#btn-export');
+      for (var k2 = 0; k2 < 90 && captured.length === c2; k2++) await sleep(100);
+      var fin = captured[captured.length - 1];
+      if (fin && fin !== pdfBlob) {
+        var fb = new Uint8Array(await fin.arrayBuffer());
+        var fdoc = await win.pdfjsLib.getDocument({ data: fb.slice(0) }).promise;
+        var ftc = await (await fdoc.getPage(1)).getTextContent();
+        var fstr = ftc.items.map(function (i) { return i.str; }).join(' | ');
+        ok('word-level correction is present in the final export', fstr.indexOf('M. Dlamini') > -1, fstr.slice(0, 160));
+      } else ok('word-level correction is present in the final export', false, 'no new blob');
+    }
+    ok('source bytes + hash still identical after all edits and exports',
+      S.sha === shaAtOpen && S.bytes.byteLength === bytes.byteLength, S.sha.slice(0, 12) + ' vs ' + shaAtOpen.slice(0, 12));
+  } catch (err) {
+    R.fail.push('HARNESS THREW: ' + (err && err.stack ? String(err.stack).slice(0, 900) : String(err)));
+  }
+  done();
+});
+</script>
+</body></html>
