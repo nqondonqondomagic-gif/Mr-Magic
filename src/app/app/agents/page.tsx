@@ -1,16 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import {
   Bot,
   Play,
   Sliders,
-  CheckCircle2,
-  Clock,
-  Sparkles,
-  ShieldCheck,
-  Zap,
+  AlertTriangle,
   Check,
 } from "lucide-react";
 import { db } from "@/lib/db/store";
@@ -19,7 +15,18 @@ export default function AgentsIndexPage() {
   const orgId = "org-apex-001";
   const [agents, setAgents] = useState(db.getAgents(orgId));
   const [runningAgentId, setRunningAgentId] = useState<string | null>(null);
-  const [executionMessage, setExecutionMessage] = useState<string | null>(null);
+  const [executionMessage, setExecutionMessage] = useState<{ text: string; isError?: boolean } | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/agents?organisationId=${orgId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.agents)) {
+          setAgents(data.agents);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleRunAgent = async (agentId: string) => {
     setRunningAgentId(agentId);
@@ -37,23 +44,61 @@ export default function AgentsIndexPage() {
       });
 
       const data = await res.json();
+      if (data.execution) {
+        const existingExecs = db.getAgentExecutions(orgId);
+        if (!existingExecs.some((e) => e.id === data.execution.id)) {
+          db.createAgentExecution(data.execution);
+        }
+      }
+      if (Array.isArray(data.approvalsCreated)) {
+        const existingApprs = db.getAgentApprovals(orgId);
+        for (const appr of data.approvalsCreated) {
+          if (!existingApprs.some((a) => a.id === appr.id)) {
+            db.createAgentApproval(appr);
+          }
+        }
+      }
+
       if (data.success) {
-        setExecutionMessage(data.message);
+        setExecutionMessage({ text: data.message, isError: false });
       } else {
-        setExecutionMessage(`Execution failed: ${data.error}`);
+        setExecutionMessage({
+          text: `Execution failed: ${data.error || data.message || "Unknown error"}`,
+          isError: true,
+        });
       }
     } catch (err: any) {
-      setExecutionMessage(err.message || "Failed to trigger agent.");
+      setExecutionMessage({
+        text: err.message || "Failed to trigger agent.",
+        isError: true,
+      });
     } finally {
       setRunningAgentId(null);
     }
   };
 
-  const handleToggleActive = (agentId: string, currentStatus: boolean) => {
-    const updated = db.updateAgent(agentId, orgId, { is_active: !currentStatus });
+  const handleToggleActive = async (agentId: string, currentStatus: boolean) => {
+    const nextStatus = !currentStatus;
+    const updated = db.updateAgent(agentId, orgId, { is_active: nextStatus });
     if (updated) {
-      setAgents(db.getAgents(orgId));
+      setAgents([...db.getAgents(orgId)]);
     }
+
+    try {
+      const res = await fetch("/api/agents", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          organisationId: orgId,
+          updates: { is_active: nextStatus },
+        }),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.agents)) {
+        setAgents(data.agents);
+      }
+    } catch {}
   };
 
   return (
@@ -86,9 +131,27 @@ export default function AgentsIndexPage() {
       </div>
 
       {executionMessage && (
-        <div className="p-4 rounded-xl bg-brand-50 border border-brand-200 text-xs font-semibold text-brand-900 flex items-center gap-2 animate-in fade-in">
-          <Check className="w-4 h-4 text-brand-600 shrink-0" />
-          <span>{executionMessage}</span>
+        <div
+          className={`p-4 rounded-xl border text-xs font-semibold flex items-center justify-between gap-2 animate-in fade-in ${
+            executionMessage.isError
+              ? "bg-rose-50 border-rose-200 text-rose-900"
+              : "bg-brand-50 border-brand-200 text-brand-900"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {executionMessage.isError ? (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            ) : (
+              <Check className="w-4 h-4 text-brand-600 shrink-0" />
+            )}
+            <span>{executionMessage.text}</span>
+          </div>
+          <Link
+            href="/app/agents/activity"
+            className="underline font-bold shrink-0 hover:opacity-80"
+          >
+            Inspect Logs →
+          </Link>
         </div>
       )}
 

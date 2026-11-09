@@ -171,24 +171,46 @@ describe("Business Manager System Test Suite", () => {
       expect(pendingNotifs.length).toBeGreaterThan(0);
     });
 
-    it("allows the Business Owner to approve or reject staged agent actions", () => {
+    it("allows the Business Owner to approve or reject staged agent actions", async () => {
       const orgId = "org-apex-001";
       const pending = db.getPendingApprovals(orgId);
       expect(pending.length).toBeGreaterThan(0);
 
       const targetApproval = pending[0];
-      const resolved = db.resolveAgentApproval(
-        targetApproval.id,
-        orgId,
-        "approved",
-        "user-sipho-001",
-        "Approved for email dispatch."
-      );
+      const resolvedResult = await agentOrchestrator.resolveApproval({
+        approvalId: targetApproval.id,
+        organisationId: orgId,
+        action: "approved",
+        reviewerId: "user-sipho-001",
+        comments: "Approved for email dispatch.",
+      });
 
-      expect(resolved).not.toBeNull();
-      expect(resolved?.status).toBe("approved");
-      expect(resolved?.reviewed_by).toBe("user-sipho-001");
-      expect(resolved?.comments).toBe("Approved for email dispatch.");
+      expect(resolvedResult).not.toBeNull();
+      expect(resolvedResult?.approval.status).toBe("approved");
+      expect(resolvedResult?.approval.reviewed_by).toBe("user-sipho-001");
+      expect(resolvedResult?.approval.comments).toBe("Approved for email dispatch.");
+    });
+
+    it("executes all 7 specialized agents without tool registry or permission errors", async () => {
+      const orgId = "org-apex-001";
+      const agents = db.getAgents(orgId);
+      expect(agents.length).toBe(7);
+
+      for (const agent of agents) {
+        const result = await agentOrchestrator.runAgent({
+          agentId: agent.id,
+          organisationId: orgId,
+          triggerSource: "manual",
+        });
+
+        expect(result.success).toBe(true);
+        expect(["completed", "waiting_approval"]).toContain(result.execution.status);
+        expect(result.stepsExecuted.length).toBeGreaterThan(0);
+
+        for (const step of result.stepsExecuted) {
+          expect(step.status).not.toBe("failed");
+        }
+      }
     });
   });
 

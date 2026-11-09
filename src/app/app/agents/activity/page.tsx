@@ -1,15 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import {
   History,
   Bot,
-  Clock,
-  CheckCircle2,
-  AlertTriangle,
-  Play,
-  RotateCcw,
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
@@ -20,6 +15,20 @@ export default function AgentActivityPage() {
   const orgId = "org-apex-001";
   const [executions, setExecutions] = useState(db.getAgentExecutions(orgId));
   const [expandedId, setExpandedId] = useState<string | null>(executions[0]?.id || null);
+
+  useEffect(() => {
+    fetch(`/api/agents?organisationId=${orgId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.executions)) {
+          setExecutions(data.executions);
+          if (data.executions.length > 0) {
+            setExpandedId((prev) => prev || data.executions[0].id);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">

@@ -1616,4 +1616,4 @@ class DatabaseStore {
 // Global singleton instance
 const globalForDb = globalThis as unknown as { dbStore?: DatabaseStore };
 export const db = globalForDb.dbStore ?? new DatabaseStore();
-if (process.env.NODE_ENV !== "production") globalForDb.dbStore = db;
+globalForDb.dbStore = db;

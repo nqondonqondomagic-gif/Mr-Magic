@@ -5,13 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Sliders,
-  Bot,
   Sparkles,
-  Lock,
-  ArrowRight,
-  ShieldCheck,
   CheckCircle2,
-  AlertCircle,
 } from "lucide-react";
 import { db } from "@/lib/db/store";
 import { BUSINESS_TOOLS } from "@/lib/ai/tools";
@@ -67,9 +62,9 @@ export default function AgentBuilderPage() {
     }
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const newAgent = db.createAgent({
+    const agentPayload = {
       id: `agent-${Date.now()}`,
       organisation_id: orgId,
       name: formData.name,
@@ -78,14 +73,16 @@ export default function AgentBuilderPage() {
       system_instructions: formData.systemInstructions,
       model: formData.model,
       permitted_tools: formData.permittedTools,
-      permitted_modules: ["crm", "sales", "tasks"],
+      permitted_modules: ["crm", "sales", "tasks"] as any,
       schedule: formData.schedule,
       requires_approval_for: formData.requiresApprovalFor,
       budget_tokens: formData.budgetTokens,
       is_active: formData.isActive,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-    });
+    };
+
+    const newAgent = db.createAgent(agentPayload);
 
     db.addAuditLog({
       id: `audit-${Date.now()}`,
@@ -98,10 +95,21 @@ export default function AgentBuilderPage() {
       created_at: new Date().toISOString(),
     });
 
+    try {
+      await fetch("/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organisationId: orgId,
+          agent: newAgent,
+        }),
+      });
+    } catch {}
+
     setSavedSuccess(true);
     setTimeout(() => {
       router.push("/app/agents");
-    }, 1200);
+    }, 1000);
   };
 
   return (

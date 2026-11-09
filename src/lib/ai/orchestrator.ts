@@ -20,6 +20,7 @@ export interface ExecuteAgentResult {
   approvalsCreated: AgentApproval[];
   stepsExecuted: AgentExecutionStep[];
   success: boolean;
+  error?: string;
   message: string;
 }
 
@@ -79,7 +80,7 @@ export class AgentOrchestrator {
       for (const planStep of plan.steps) {
         const toolDef = BUSINESS_TOOLS[planStep.tool];
 
-        // Server-Side Tool Permission Check
+        // Server-Side Tool Existence Check
         if (!toolDef) {
           const stepRecord: AgentExecutionStep = {
             id: `step-${Date.now()}-${stepNumber}`,
@@ -197,15 +198,30 @@ export class AgentOrchestrator {
         }
       }
 
-      // Finalize Execution Record
+      // Finalize Execution Record & Evaluate Step Failures
       const durationMs = Date.now() - startTime;
-      const finalStatus = requiresHumanApproval ? "waiting_approval" : "completed";
+      const failedSteps = stepsExecuted.filter((s) => s.status === "failed");
+      const allStepsFailed = stepsExecuted.length === 0 || failedSteps.length === stepsExecuted.length;
+
+      let finalStatus: AgentExecution["status"];
+      if (requiresHumanApproval) {
+        finalStatus = "waiting_approval";
+      } else if (allStepsFailed) {
+        finalStatus = "failed";
+      } else {
+        finalStatus = "completed";
+      }
+
+      const firstError = failedSteps[0]?.tool_output?.error;
 
       execution.status = finalStatus;
       execution.completed_at = new Date().toISOString();
       execution.execution_duration_ms = durationMs;
       execution.total_tokens = 1500 + stepsExecuted.length * 450;
       execution.steps = stepsExecuted;
+      if (firstError) {
+        execution.error_message = firstError;
+      }
 
       db.updateAgentExecution(executionId, org.id, execution);
 
@@ -221,6 +237,17 @@ export class AgentOrchestrator {
         created_at: new Date().toISOString(),
       });
 
+      if (finalStatus === "failed") {
+        return {
+          execution,
+          approvalsCreated,
+          stepsExecuted,
+          success: false,
+          error: firstError || `All ${stepsExecuted.length} execution step(s) failed.`,
+          message: firstError || `${agent.name} failed during step execution.`,
+        };
+      }
+
       return {
         execution,
         approvalsCreated,
@@ -228,7 +255,7 @@ export class AgentOrchestrator {
         success: true,
         message: requiresHumanApproval
           ? `${agent.name} executed read operations and staged ${approvalsCreated.length} action(s) for your approval.`
-          : `${agent.name} completed all operations successfully.`,
+          : `${agent.name} completed all ${stepsExecuted.length} operations successfully.`,
       };
     } catch (error: any) {
       execution.status = "failed";
@@ -241,9 +268,96 @@ export class AgentOrchestrator {
         approvalsCreated: [],
         stepsExecuted: [],
         success: false,
+        error: error.message,
         message: error.message,
       };
     }
+  }
+
+  /**
+   * Resolves a human-in-the-loop approval and executes the underlying tool if approved.
+   */
+  public async resolveApproval(options: {
+    approvalId: string;
+    organisationId: string;
+    action: "approved" | "rejected";
+    reviewerId?: string;
+    comments?: string;
+  }) {
+    const resolved = db.resolveAgentApproval(
+      options.approvalId,
+      options.organisationId,
+      options.action,
+      options.reviewerId,
+      options.comments
+    );
+    if (!resolved) {
+      return null;
+    }
+
+    let executionResult: any = null;
+    const toolDef = BUSINESS_TOOLS[resolved.action_type];
+
+    if (options.action === "approved" && toolDef) {
+      try {
+        executionResult = await toolDef.handler(resolved.proposed_payload || {}, {
+          orgId: options.organisationId,
+          agentId: resolved.agent_id,
+          executionId: resolved.execution_id,
+        });
+      } catch (err: any) {
+        executionResult = { error: err.message || "Approved tool execution failed." };
+      }
+    }
+
+    // Update associated execution step and execution status if present
+    const executions = db.getAgentExecutions(options.organisationId);
+    const parentExec = executions.find((e) => e.id === resolved.execution_id);
+    if (parentExec && parentExec.steps) {
+      for (const step of parentExec.steps) {
+        if (
+          step.status === "blocked_approval" &&
+          (step.tool_output?.approval_id === resolved.id || step.tool_name === resolved.action_type)
+        ) {
+          step.status = options.action === "approved" ? "success" : "failed";
+          step.tool_output =
+            options.action === "approved"
+              ? {
+                  approved_by: options.reviewerId || "Business Owner",
+                  executed_at: new Date().toISOString(),
+                  result: executionResult || { status: "dispatched" },
+                }
+              : {
+                  rejected_by: options.reviewerId || "Business Owner",
+                  rejected_at: new Date().toISOString(),
+                  comments: options.comments,
+                };
+        }
+      }
+
+      const stillBlocked = parentExec.steps.some((s) => s.status === "blocked_approval");
+      if (!stillBlocked) {
+        parentExec.status = options.action === "approved" ? "completed" : "failed";
+        parentExec.completed_at = new Date().toISOString();
+      }
+    }
+
+    db.addAuditLog({
+      id: `audit-${Date.now()}`,
+      organisation_id: options.organisationId,
+      user_id: options.reviewerId,
+      user_name: "Business Owner",
+      action: `agent_action_${options.action}`,
+      entity_type: "agent_approval",
+      entity_id: resolved.id,
+      details: `Action "${resolved.description}" was ${options.action.toUpperCase()} by reviewer. Comments: ${options.comments || "None"}`,
+      created_at: new Date().toISOString(),
+    });
+
+    return {
+      approval: resolved,
+      executionResult,
+    };
   }
 }
 

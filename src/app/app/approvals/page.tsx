@@ -1,17 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   CheckCircle2,
   XCircle,
-  AlertTriangle,
-  Clock,
   Bot,
-  Mail,
-  Receipt,
-  User,
-  ArrowRight,
-  ShieldCheck,
   Check,
 } from "lucide-react";
 import { db } from "@/lib/db/store";
@@ -25,31 +18,55 @@ export default function ApprovalsPage() {
   const [commentText, setCommentText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    fetch(`/api/agents?organisationId=${orgId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.approvals)) {
+          setApprovals(data.approvals);
+          if (data.approvals.length > 0) {
+            setSelectedApproval((prev: any) =>
+              prev ? data.approvals.find((a: any) => a.id === prev.id) || data.approvals[0] : data.approvals[0]
+            );
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const handleResolve = async (id: string, action: "approved" | "rejected") => {
     setIsSubmitting(true);
     setActionSuccess(null);
+    const resolvedComments =
+      commentText || (action === "approved" ? "Approved by Business Owner" : "Rejected by Business Owner");
+
     try {
       const res = await fetch(`/api/agents/approvals/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action,
-          comments: commentText || (action === "approved" ? "Approved by Business Owner" : "Rejected by Business Owner"),
+          comments: resolvedComments,
           organisationId: orgId,
           reviewerId: "user-sipho-001",
         }),
       });
 
-      if (res.ok) {
-        // Refresh local state
-        const updated = db.getAgentApprovals(orgId);
-        setApprovals(updated);
-        setSelectedApproval(updated.find((a) => a.id === id) || null);
-        setActionSuccess(`Action successfully ${action.toUpperCase()} and recorded in audit log.`);
-        setCommentText("");
-      }
+      const data = await res.json();
+      // Keep client-side db in sync as well
+      db.resolveAgentApproval(id, orgId, action, "user-sipho-001", resolvedComments);
+
+      const updatedList = Array.isArray(data.approvals) ? data.approvals : db.getAgentApprovals(orgId);
+      setApprovals(updatedList);
+      setSelectedApproval(updatedList.find((a: any) => a.id === id) || null);
+      setActionSuccess(`Action successfully ${action.toUpperCase()} and recorded in audit log.`);
+      setCommentText("");
     } catch {
-      setActionSuccess(`Action marked as ${action}.`);
+      db.resolveAgentApproval(id, orgId, action, "user-sipho-001", resolvedComments);
+      const updatedList = [...db.getAgentApprovals(orgId)];
+      setApprovals(updatedList);
+      setSelectedApproval(updatedList.find((a) => a.id === id) || null);
+      setActionSuccess(`Action marked as ${action.toUpperCase()}.`);
     } finally {
       setIsSubmitting(false);
     }
@@ -84,7 +101,6 @@ export default function ApprovalsPage() {
           <div className="space-y-2.5">
             {approvals.map((appr) => {
               const isSelected = selectedApproval?.id === appr.id;
-              const isPending = appr.status === "pending";
 
               return (
                 <div

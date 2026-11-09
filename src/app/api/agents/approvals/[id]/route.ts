@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db/store";
+import { agentOrchestrator } from "@/lib/ai/orchestrator";
 
 export async function POST(
   req: NextRequest,
@@ -14,25 +15,27 @@ export async function POST(
       return NextResponse.json({ success: false, error: "Action must be 'approved' or 'rejected'" }, { status: 400 });
     }
 
-    const resolved = db.resolveAgentApproval(id, organisationId, action, reviewerId, comments);
-    if (!resolved) {
-      return NextResponse.json({ success: false, error: "Approval record not found or does not belong to this organisation." }, { status: 404 });
-    }
-
-    // Add audit log
-    db.addAuditLog({
-      id: `audit-${Date.now()}`,
-      organisation_id: organisationId,
-      user_id: reviewerId,
-      user_name: "Business Owner",
-      action: `agent_action_${action}`,
-      entity_type: "agent_approval",
-      entity_id: id,
-      details: `Action "${resolved.description}" was ${action.toUpperCase()} by reviewer. Comments: ${comments || "None"}`,
-      created_at: new Date().toISOString(),
+    const result = await agentOrchestrator.resolveApproval({
+      approvalId: id,
+      organisationId,
+      action,
+      reviewerId,
+      comments,
     });
 
-    return NextResponse.json({ success: true, approval: resolved });
+    if (!result) {
+      return NextResponse.json(
+        { success: false, error: "Approval record not found or does not belong to this organisation." },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      approval: result.approval,
+      executionResult: result.executionResult,
+      approvals: db.getAgentApprovals(organisationId),
+    });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
